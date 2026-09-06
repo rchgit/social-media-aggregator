@@ -1,0 +1,16 @@
+# Social Media Aggregator configuration.
+
+[settings]
+# Where the SQLite database lives. Relative paths resolve against the
+# directory containing this config file.
+db_path = "sma.db"
+# Where downloaded images are cached.
+cache_dir = "sma-cache"
+# Feed page size used by the TUI and `sma feed`.
+page_size = 50
+
+[secrets]
+# Named commands that emit a credential on stdout. Reference them from an
+# account's `--secret` as `cmd:<name>`.
+#   [secrets.commands]
+#   twitter = "pass show social/twitter"
