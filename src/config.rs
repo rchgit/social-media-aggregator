@@ -128,3 +128,114 @@ page_size = 50
 "#
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_match_documented_values() {
+        let c = Config::default();
+        assert_eq!(c.settings.db_path, "sma.db");
+        assert_eq!(c.settings.cache_dir, "sma-cache");
+        assert_eq!(c.settings.page_size, 50);
+        assert!(c.secrets.commands.is_empty());
+        assert_eq!(DEFAULT_DB_FILE, "sma.db");
+        assert_eq!(DEFAULT_CACHE_DIR, "sma-cache");
+    }
+
+    #[test]
+    fn serde_defaults_fill_missing_fields() {
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.settings.db_path, "sma.db");
+        assert_eq!(c.settings.page_size, 50);
+        let c: Config = toml::from_str("[settings]\npage_size = 7\n").unwrap();
+        assert_eq!(c.settings.page_size, 7);
+        assert_eq!(c.settings.db_path, "sma.db");
+    }
+
+    #[test]
+    fn roundtrip_preserves_secrets_and_settings() {
+        let text = r#"
+[settings]
+db_path = "data/other.db"
+cache_dir = "data/cache"
+page_size = 10
+
+[secrets.commands]
+twitter = "pass show tw"
+"#;
+        let c: Config = toml::from_str(text).unwrap();
+        assert_eq!(c.secrets.commands.get("twitter").unwrap(), "pass show tw");
+        let serialized = toml::to_string(&c).unwrap();
+        let back: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(back.settings.db_path, "data/other.db");
+        assert_eq!(back.secrets.commands.get("twitter").unwrap(), "pass show tw");
+    }
+
+    #[test]
+    fn load_parses_file_and_migrates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sma.toml");
+        std::fs::write(&path, "[settings]\npage_size = 3\n").unwrap();
+        let c = Config::load(&path).unwrap();
+        assert_eq!(c.settings.page_size, 3);
+    }
+
+    #[test]
+    fn load_reports_read_failure() {
+        let err = Config::load(Path::new("/definitely/missing/sma.toml")).unwrap_err();
+        assert!(err.to_string().contains("failed to read"), "{err}");
+    }
+
+    #[test]
+    fn load_reports_parse_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "[settings\nbroken").unwrap();
+        let err = Config::load(&path).unwrap_err();
+        assert!(err.to_string().contains("failed to parse"), "{err}");
+    }
+
+    #[test]
+    fn load_or_default_uses_file_when_present_and_resolves_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sma.toml");
+        std::fs::write(&path, "[settings]\ndb_path = \"x.db\"\n").unwrap();
+        let c = Config::load_or_default(&path).unwrap();
+        assert_eq!(c.db_path(), dir.path().join("x.db"));
+        assert_eq!(c.cache_dir(), dir.path().join("sma-cache"));
+    }
+
+    #[test]
+    fn load_or_default_falls_back_to_defaults_for_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.toml");
+        let c = Config::load_or_default(&path).unwrap();
+        assert_eq!(c.db_path(), dir.path().join("sma.db"));
+    }
+
+    #[test]
+    fn resolve_paths_leaves_absolute_paths_alone() {
+        let mut c = Config::default();
+        c.settings.db_path = "/abs/db.sqlite".into();
+        c.settings.cache_dir = "/abs/cache".into();
+        c.resolve_paths(Path::new("/base"));
+        assert_eq!(c.settings.db_path, "/abs/db.sqlite");
+        assert_eq!(c.settings.cache_dir, "/abs/cache");
+    }
+
+    #[test]
+    fn secret_resolver_carries_commands() {
+        let mut c = Config::default();
+        c.secrets.commands.insert("p".into(), "echo hi".into());
+        let r = c.secret_resolver();
+        assert_eq!(r.try_resolve("cmd:p").as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn sample_toml_parses_into_default_config() {
+        let c: Config = toml::from_str(Config::sample_toml()).unwrap();
+        assert_eq!(c.settings.page_size, 50);
+    }
+}

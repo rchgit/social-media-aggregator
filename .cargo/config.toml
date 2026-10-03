@@ -1,0 +1,14 @@
+# This project links on a host that ships a runtime-only glibc (no
+# glibc-devel: missing crt1.o/crti.o, the libc.so linker scripts, and the
+# system C headers). A local glibc-devel shim is unpacked under
+# ~/.local/share/sma-sysroot and referenced here so `cargo build`/`test`
+# work without installing glibc-devel system-wide.
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+  "-C", "link-arg=-B/home/rch/.local/share/sma-sysroot/lib64",
+  "-C", "link-arg=-L/home/rch/.local/share/sma-sysroot/lib64",
+]
+
+[env]
+# C crates (ring, bundled sqlite3) compile against the shim's glibc headers.
+CFLAGS = "-isystem /home/rch/.local/share/sma-sysroot/include"

@@ -153,3 +153,108 @@ pub struct SyncCursor {
     pub cursor: Option<String>,
     pub last_synced_at: Option<DateTime<Utc>>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn as_str_roundtrips_through_from_str() {
+        for n in Network::ALL {
+            assert_eq!(n.as_str().parse::<Network>().unwrap(), n);
+            assert_eq!(n.to_string(), n.as_str());
+        }
+    }
+
+    #[test]
+    fn from_str_is_case_insensitive_and_accepts_twitter_alias() {
+        assert_eq!("FACEBOOK".parse::<Network>().unwrap(), Network::Facebook);
+        assert_eq!("Reddit".parse::<Network>().unwrap(), Network::Reddit);
+        assert_eq!("twitter".parse::<Network>().unwrap(), Network::X);
+        assert_eq!("x".parse::<Network>().unwrap(), Network::X);
+        assert_eq!(" TikTok ".trim().parse::<Network>().unwrap(), Network::TikTok);
+    }
+
+    #[test]
+    fn from_str_rejects_unknown() {
+        let err = "myspace".parse::<Network>().unwrap_err();
+        assert!(err.contains("unknown network `myspace`"), "{err}");
+    }
+
+    #[test]
+    fn icons_are_distinct_per_network() {
+        let icons: Vec<_> = Network::ALL.iter().map(|n| n.icon()).collect();
+        for (i, a) in icons.iter().enumerate() {
+            for b in &icons[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn default_rate_limits_are_positive() {
+        for n in Network::ALL {
+            assert!(n.default_rate_limit() > 0, "{n}");
+        }
+    }
+
+    #[test]
+    fn topic_matches_is_case_insensitive_over_content_and_author() {
+        let t = Topic {
+            id: 1,
+            name: "rust".into(),
+            keywords: vec!["Rust".into(), "TUI".into()],
+            enabled: true,
+        };
+        assert!(t.matches("I love RUST lang"));
+        assert!(t.matches("a nice tui app"));
+        assert!(t.matches("mixed CaSe TuI"));
+        assert!(!t.matches("golang news"));
+    }
+
+    #[test]
+    fn topic_ignores_empty_keywords() {
+        let t = Topic {
+            id: 1,
+            name: "t".into(),
+            keywords: vec![String::new()],
+            enabled: true,
+        };
+        // An empty keyword would otherwise match every haystack.
+        assert!(!t.matches("anything"));
+    }
+
+    #[test]
+    fn account_and_post_serialize_with_snake_case_fields() {
+        let post = Post {
+            id: 1,
+            network: Network::X,
+            account_handle: "alice".into(),
+            external_id: "42".into(),
+            author: "alice".into(),
+            content: "hi".into(),
+            url: "https://x.com/a/1".into(),
+            created_at: chrono::Utc::now(),
+            fetched_at: chrono::Utc::now(),
+            images: Vec::new(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&post).unwrap();
+        assert_eq!(v["external_id"], "42");
+        assert_eq!(v["account_handle"], "alice");
+        let back: Post = serde_json::from_value(v).unwrap();
+        assert_eq!(back.external_id, "42");
+    }
+
+    #[test]
+    fn sync_cursor_is_cloneable_and_debuggable() {
+        let c = SyncCursor {
+            account_id: 3,
+            cursor: Some("abc".into()),
+            last_synced_at: Some(chrono::Utc::now()),
+        };
+        let clone = c.clone();
+        assert_eq!(clone.account_id, 3);
+        assert_eq!(clone.cursor.as_deref(), Some("abc"));
+        assert!(format!("{c:?}").contains("SyncCursor"));
+    }
+}

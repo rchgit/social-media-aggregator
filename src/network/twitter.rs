@@ -11,7 +11,24 @@ const BASE: &str = "https://api.x.com/2";
 
 /// X (Twitter) API v2. `account.handle` is the @username; it is resolved to a
 /// user id before listing tweets.
-pub struct TwitterAdapter;
+pub struct TwitterAdapter {
+    base: String,
+}
+
+impl Default for TwitterAdapter {
+    fn default() -> Self {
+        Self { base: BASE.to_string() }
+    }
+}
+
+impl TwitterAdapter {
+    /// Test-only constructor overriding the API base URL.
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub fn test_with_base(base: String) -> Self {
+        Self { base }
+    }
+}
 
 impl NetworkAdapter for TwitterAdapter {
     fn network(&self) -> Network {
@@ -27,10 +44,10 @@ impl NetworkAdapter for TwitterAdapter {
         limit: usize,
     ) -> Result<FetchPage, NetworkError> {
         let token = require_secret(secrets, account, Network::X)?;
-        let user_id = resolve_user_id(client, &token, &account.handle)?;
+        let user_id = resolve_user_id(client, &self.base, &token, &account.handle)?;
 
         let mut req = client
-            .get(format!("{BASE}/users/{user_id}/tweets"))
+            .get(format!("{}/users/{user_id}/tweets", self.base))
             .bearer_auth(&token)
             .query(&[
                 ("tweet.fields", "created_at,attachments,author_id"),
@@ -133,6 +150,7 @@ impl NetworkAdapter for TwitterAdapter {
 
 fn resolve_user_id(
     client: &reqwest::blocking::Client,
+    base: &str,
     token: &str,
     handle: &str,
 ) -> Result<String, NetworkError> {
@@ -141,7 +159,7 @@ fn resolve_user_id(
     }
     let resp = client
         .get(format!(
-            "{BASE}/users/by/username/{}",
+            "{base}/users/by/username/{}",
             handle.trim_start_matches('@')
         ))
         .bearer_auth(token)

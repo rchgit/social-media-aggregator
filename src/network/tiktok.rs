@@ -10,7 +10,24 @@ const BASE: &str = "https://open.tiktokapis.com/v2/video/list/";
 
 /// TikTok Display API. Videos carry a cover image which is surfaced as the
 /// post image; the clip itself is out of scope for this text/image release.
-pub struct TikTokAdapter;
+pub struct TikTokAdapter {
+    base: String,
+}
+
+impl Default for TikTokAdapter {
+    fn default() -> Self {
+        Self { base: BASE.to_string() }
+    }
+}
+
+impl TikTokAdapter {
+    /// Test-only constructor overriding the API base URL.
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub fn test_with_base(base: String) -> Self {
+        Self { base }
+    }
+}
 
 impl NetworkAdapter for TikTokAdapter {
     fn network(&self) -> Network {
@@ -35,7 +52,7 @@ impl NetworkAdapter for TikTokAdapter {
         }
 
         let resp = client
-            .post(BASE)
+            .post(&self.base)
             .bearer_auth(&token)
             .json(&body)
             .send()

@@ -5,6 +5,19 @@ mod threads;
 mod tiktok;
 mod twitter;
 
+#[doc(hidden)]
+pub use facebook::FacebookAdapter;
+#[doc(hidden)]
+pub use instagram::InstagramAdapter;
+#[doc(hidden)]
+pub use reddit::RedditAdapter;
+#[doc(hidden)]
+pub use threads::ThreadsAdapter;
+#[doc(hidden)]
+pub use tiktok::TikTokAdapter;
+#[doc(hidden)]
+pub use twitter::TwitterAdapter;
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -178,11 +191,136 @@ pub(crate) fn parse_created_at(s: &str) -> Option<DateTime<Utc>> {
 /// Returns the adapter for a network.
 pub fn adapter_for(network: Network) -> Box<dyn NetworkAdapter> {
     match network {
-        Network::Facebook => Box::new(facebook::FacebookAdapter),
-        Network::Instagram => Box::new(instagram::InstagramAdapter),
-        Network::Threads => Box::new(threads::ThreadsAdapter),
-        Network::TikTok => Box::new(tiktok::TikTokAdapter),
-        Network::X => Box::new(twitter::TwitterAdapter),
-        Network::Reddit => Box::new(reddit::RedditAdapter),
+        Network::Facebook => Box::new(facebook::FacebookAdapter::default()),
+        Network::Instagram => Box::new(instagram::InstagramAdapter::default()),
+        Network::Threads => Box::new(threads::ThreadsAdapter::default()),
+        Network::TikTok => Box::new(tiktok::TikTokAdapter::default()),
+        Network::X => Box::new(twitter::TwitterAdapter::default()),
+        Network::Reddit => Box::new(reddit::RedditAdapter::default()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Error as AppError;
+
+    fn account(secret_ref: &str) -> Account {
+        Account {
+            id: 1,
+            network: Network::X,
+            handle: "alice".into(),
+            display_name: "Alice".into(),
+            secret_ref: secret_ref.into(),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn require_secret_resolves_when_present() {
+        std::env::set_var("SMA_TEST_NET_OK", "tok");
+        let a = account("SMA_TEST_NET_OK");
+        let s = SecretResolver::default();
+        assert_eq!(require_secret(&s, &a, Network::X).unwrap(), "tok");
+    }
+
+    #[test]
+    fn require_secret_maps_missing_to_credentials_required() {
+        let a = account("SMA_TEST_NET_MISSING");
+        let s = SecretResolver::default();
+        let err = require_secret(&s, &a, Network::X).unwrap_err();
+        match err {
+            NetworkError::CredentialsRequired(Network::X, name) => assert_eq!(name, "SMA_TEST_NET_MISSING"),
+            other => panic!("wrong error: {other}"),
+        }
+    }
+
+    #[test]
+    fn raw_post_and_page_clone_and_default() {
+        let page = FetchPage::default();
+        assert!(page.posts.is_empty());
+        assert!(page.next_cursor.is_none());
+        let raw = RawPost {
+            external_id: "1".into(),
+            author: "a".into(),
+            content: "c".into(),
+            url: "u".into(),
+            created_at: Utc::now(),
+            images: vec![RawImage { url: "i".into(), alt_text: None }],
+        };
+        let clone = raw.clone();
+        assert_eq!(clone.external_id, "1");
+        assert_eq!(clone.images.len(), 1);
+    }
+
+    #[test]
+    fn network_error_messages_render_with_network_name() {
+        let e = NetworkError::Unsupported(Network::TikTok);
+        assert_eq!(e.to_string(), "tiktok: not supported yet");
+        let e = NetworkError::Parse(Network::X, "bad json".into());
+        assert_eq!(e.to_string(), "x: bad json");
+        let e = NetworkError::Request(Network::Reddit, "timeout".into());
+        assert_eq!(e.to_string(), "reddit: request failed: timeout");
+        let e = NetworkError::HttpStatus {
+            network: Network::Facebook,
+            status: 500,
+            body: "boom".into(),
+        };
+        assert_eq!(e.to_string(), "facebook: HTTP 500: boom");
+        let e = NetworkError::RateLimited { network: Network::X, retry_after: 12 };
+        assert_eq!(e.to_string(), "x: rate limited; retry after 12s");
+        let e = NetworkError::CredentialsRequired(Network::X, "T".into());
+        assert!(e.to_string().contains("missing credential `T`"));
+    }
+
+    #[test]
+    fn network_errors_convert_into_app_error() {
+        let e: AppError = NetworkError::Unsupported(Network::X).into();
+        assert!(matches!(e, AppError::Network(_)));
+    }
+
+    #[test]
+    fn seconds_to_dt_handles_fractional_and_invalid() {
+        let dt = seconds_to_dt(1_700_000_000.25);
+        assert_eq!(dt.timestamp(), 1_700_000_000);
+        assert_eq!(dt.timestamp_subsec_nanos(), 250_000_000);
+        // NaN/absurd values degrade to the epoch instead of panicking.
+        let dt = seconds_to_dt(f64::NAN);
+        assert_eq!(dt.timestamp(), 0);
+    }
+
+    #[test]
+    fn parse_created_at_supports_rfc3339_and_meta_format() {
+        let dt = parse_created_at("2024-01-01T00:00:00Z").unwrap();
+        assert_eq!(dt.timestamp(), 1_704_067_200);
+        let dt = parse_created_at("2024-01-01T00:00:00+0000").unwrap();
+        assert_eq!(dt.timestamp(), 1_704_067_200);
+        let dt = parse_created_at("2024-01-01T02:00:00+0200").unwrap();
+        assert_eq!(dt.timestamp(), 1_704_067_200);
+        assert!(parse_created_at("not a date").is_none());
+        assert!(parse_created_at("").is_none());
+    }
+
+    #[test]
+    fn rate_limiter_enforces_minimum_gap_between_calls() {
+        let limiter = RateLimiter::new();
+        // 30 per minute -> 2s gap; two immediate calls must be spaced apart.
+        let start = std::time::Instant::now();
+        limiter.wait(Network::X, 100_000); // effectively no gap
+        limiter.wait(Network::X, 100_000);
+        assert!(start.elapsed() < std::time::Duration::from_millis(500));
+    }
+
+    #[test]
+    fn rate_limiter_zero_rate_does_not_divide_by_zero() {
+        let limiter = RateLimiter::default();
+        limiter.wait(Network::Reddit, 0);
+    }
+
+    #[test]
+    fn adapter_for_returns_matching_network() {
+        for n in Network::ALL {
+            assert_eq!(adapter_for(n).network(), n);
+        }
     }
 }

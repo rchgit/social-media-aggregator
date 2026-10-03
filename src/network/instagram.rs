@@ -7,11 +7,28 @@ use super::{
 use crate::models::{Account, Network};
 use crate::secrets::SecretResolver;
 
-const BASE: &str = "https://graph.facebook.com/v20.0";
+const DEFAULT_BASE: &str = "https://graph.facebook.com/v20.0";
 
 /// Instagram via the Meta Graph API. `account.handle` is the Instagram
 /// Business/creator account id.
-pub struct InstagramAdapter;
+pub struct InstagramAdapter {
+    base: String,
+}
+
+impl Default for InstagramAdapter {
+    fn default() -> Self {
+        Self { base: DEFAULT_BASE.to_string() }
+    }
+}
+
+impl InstagramAdapter {
+    /// Test-only constructor overriding the API base URL.
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub fn test_with_base(base: String) -> Self {
+        Self { base }
+    }
+}
 
 impl NetworkAdapter for InstagramAdapter {
     fn network(&self) -> Network {
@@ -28,7 +45,7 @@ impl NetworkAdapter for InstagramAdapter {
     ) -> Result<FetchPage, NetworkError> {
         let token = require_secret(secrets, account, Network::Instagram)?;
         let mut req = client
-            .get(format!("{BASE}/{}/media", account.handle))
+            .get(format!("{}/{}/media", self.base, account.handle))
             .query(&[
                 (
                     "fields",

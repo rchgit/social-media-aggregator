@@ -7,11 +7,28 @@ use super::{
 use crate::models::{Account, Network};
 use crate::secrets::SecretResolver;
 
-const BASE: &str = "https://graph.threads.net/v1.0";
+const DEFAULT_BASE: &str = "https://graph.threads.net/v1.0";
 
 /// Threads via the Threads API (a Meta Graph API variant). `account.handle`
 /// is the Threads user id.
-pub struct ThreadsAdapter;
+pub struct ThreadsAdapter {
+    base: String,
+}
+
+impl Default for ThreadsAdapter {
+    fn default() -> Self {
+        Self { base: DEFAULT_BASE.to_string() }
+    }
+}
+
+impl ThreadsAdapter {
+    /// Test-only constructor overriding the API base URL.
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub fn test_with_base(base: String) -> Self {
+        Self { base }
+    }
+}
 
 impl NetworkAdapter for ThreadsAdapter {
     fn network(&self) -> Network {
@@ -28,7 +45,7 @@ impl NetworkAdapter for ThreadsAdapter {
     ) -> Result<FetchPage, NetworkError> {
         let token = require_secret(secrets, account, Network::Threads)?;
         let mut req = client
-            .get(format!("{BASE}/{}/threads", account.handle))
+            .get(format!("{}/{}/threads", self.base, account.handle))
             .query(&[
                 (
                     "fields",

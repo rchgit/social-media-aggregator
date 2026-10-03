@@ -2,7 +2,7 @@ use reqwest::blocking::Client;
 
 use crate::error::Result;
 use crate::models::{Network, Post, PostImage, Topic};
-use crate::network::{adapter_for, NetworkError, RateLimiter, RawPost};
+use crate::network::{adapter_for, NetworkAdapter, NetworkError, RateLimiter, RawPost};
 use crate::secrets::SecretResolver;
 use crate::storage::Storage;
 
@@ -67,6 +67,7 @@ pub fn sync(
 
     let mut report = Vec::new();
     for account in accounts {
+        let adapter = adapter_for(account.network);
         report.push(sync_account(
             &client,
             storage,
@@ -74,6 +75,7 @@ pub fn sync(
             &limiter,
             &account,
             &enabled_topics,
+            adapter.as_ref(),
         ));
     }
     Ok(report)
@@ -86,6 +88,7 @@ fn sync_account(
     limiter: &RateLimiter,
     account: &crate::models::Account,
     topics: &[&Topic],
+    adapter: &dyn NetworkAdapter,
 ) -> AccountSync {
     let mut result = AccountSync {
         account_id: account.id,
@@ -95,8 +98,6 @@ fn sync_account(
         inserted: 0,
         status: SyncStatus::Ok,
     };
-
-    let adapter = adapter_for(account.network);
     limiter.wait(account.network, account.network.default_rate_limit());
 
     let mut cursor = match storage.get_cursor(account.id) {
@@ -189,4 +190,41 @@ fn match_topics(topics: &[&Topic], post: &Post) -> Vec<i64> {
         .filter(|t| t.matches(&haystack))
         .map(|t| t.id)
         .collect()
+}
+
+/// Like [`sync`], but driven by caller-provided adapters; used by tests to
+/// exercise the loop without touching the network.
+#[doc(hidden)]
+pub fn sync_with(
+    storage: &Storage,
+    secrets: &SecretResolver,
+    account_filter: Option<&str>,
+    client: &Client,
+    adapters: &std::collections::HashMap<Network, Box<dyn NetworkAdapter>>,
+) -> Result<Vec<AccountSync>> {
+    let accounts: Vec<_> = storage
+        .list_accounts()?
+        .into_iter()
+        .filter(|a| a.enabled)
+        .filter(|a| account_filter.is_none_or(|f| a.handle == f))
+        .collect();
+    let topics = storage.list_topics()?;
+    let enabled_topics: Vec<&Topic> = topics.iter().filter(|t| t.enabled).collect();
+    let limiter = RateLimiter::new();
+    let mut report = Vec::new();
+    for account in accounts {
+        let adapter = adapters
+            .get(&account.network)
+            .expect("no adapter registered for account network");
+        report.push(sync_account(
+            client,
+            storage,
+            secrets,
+            &limiter,
+            &account,
+            &enabled_topics,
+            adapter.as_ref(),
+        ));
+    }
+    Ok(report)
 }

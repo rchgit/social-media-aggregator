@@ -7,11 +7,29 @@ use super::{
 use crate::models::{Account, Network};
 use crate::secrets::SecretResolver;
 
-const BASE: &str = "https://graph.facebook.com/v20.0";
+const DEFAULT_BASE: &str = "https://graph.facebook.com/v20.0";
 
 /// Facebook Graph API. `account.handle` is the page or user id to read (or
 /// `me` for the token owner).
-pub struct FacebookAdapter;
+pub struct FacebookAdapter {
+    base: String,
+}
+
+impl Default for FacebookAdapter {
+    fn default() -> Self {
+        Self { base: DEFAULT_BASE.to_string() }
+    }
+}
+
+impl FacebookAdapter {
+    /// Test-only constructor overriding the API base URL.
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub fn test_with_base(base: String) -> Self {
+        Self { base }
+    }
+}
+
 
 impl NetworkAdapter for FacebookAdapter {
     fn network(&self) -> Network {
@@ -28,7 +46,7 @@ impl NetworkAdapter for FacebookAdapter {
     ) -> Result<FetchPage, NetworkError> {
         let token = require_secret(secrets, account, Network::Facebook)?;
         let mut req = client
-            .get(format!("{BASE}/{}/posts", account.handle))
+            .get(format!("{}/{}/posts", self.base, account.handle))
             .query(&[
                 (
                     "fields",

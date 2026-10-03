@@ -12,7 +12,24 @@ const BASE: &str = "https://www.reddit.com";
 /// Reddit's public JSON API works without authentication for read-only
 /// listing of a user's submissions, so this adapter is fully functional
 /// out of the box. An optional OAuth bearer token is used when configured.
-pub struct RedditAdapter;
+pub struct RedditAdapter {
+    base: String,
+}
+
+impl Default for RedditAdapter {
+    fn default() -> Self {
+        Self { base: BASE.to_string() }
+    }
+}
+
+impl RedditAdapter {
+    /// Test-only constructor overriding the API base URL.
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub fn test_with_base(base: String) -> Self {
+        Self { base }
+    }
+}
 
 impl NetworkAdapter for RedditAdapter {
     fn network(&self) -> Network {
@@ -28,7 +45,7 @@ impl NetworkAdapter for RedditAdapter {
         limit: usize,
     ) -> Result<FetchPage, NetworkError> {
         let mut req = client
-            .get(format!("{BASE}/user/{}/submitted.json", account.handle))
+            .get(format!("{}/user/{}/submitted.json", self.base, account.handle))
             .query(&[("limit", limit.min(100).to_string())])
             .header(reqwest::header::USER_AGENT, USER_AGENT);
         if let Some(token) = secrets.try_resolve(&account.secret_ref) {
@@ -79,7 +96,7 @@ impl NetworkAdapter for RedditAdapter {
                 format!("{title}\n\n{selftext}")
             };
             let permalink = d.get("permalink").and_then(|v| v.as_str()).unwrap_or("");
-            let url = format!("{BASE}{permalink}");
+            let url = format!("{}{}", self.base, permalink);
             let created = d
                 .get("created_utc")
                 .and_then(|v| v.as_f64())

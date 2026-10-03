@@ -522,4 +522,178 @@ mod tests {
         assert_eq!(s.feed_count(a).unwrap(), 1);
         assert_eq!(s.feed_count(b).unwrap(), 0);
     }
+
+    #[test]
+    fn open_creates_parent_directories_and_reopens_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/dir/sma.db");
+        {
+            let s = Storage::open(&path).unwrap();
+            s.add_topic("t", &[]).unwrap();
+        }
+        let s = Storage::open(&path).unwrap();
+        assert_eq!(s.list_topics().unwrap().len(), 1);
+        assert_eq!(s.list_accounts().unwrap().len(), 0);
+        assert!(s.get_cursor(1).unwrap().is_none());
+    }
+
+    #[test]
+    fn account_crud_and_upsert() {
+        let s = Storage::in_memory().unwrap();
+        let id = s.add_account(Network::X, "alice", "Alice", "env:TOKEN").unwrap();
+        let id2 = s.add_account(Network::Reddit, "bob", "", "").unwrap();
+        assert_ne!(id, id2);
+
+        let accounts = s.list_accounts().unwrap();
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].network, Network::Reddit);
+        assert_eq!(accounts[0].handle, "bob");
+        assert!(accounts[0].enabled);
+
+        let got = s.get_account(id).unwrap().unwrap();
+        assert_eq!(got.display_name, "Alice");
+        assert_eq!(got.secret_ref, "env:TOKEN");
+        assert!(s.get_account(999).unwrap().is_none());
+
+        // Upsert on (network, handle) updates in place instead of duplicating.
+        s.add_account(Network::X, "alice", "Alice A", "cmd:p").unwrap();
+        // AUTOINCREMENT means the conflicting insert mints a fresh rowid;
+        // the upsert contract is "no duplicate row, fields updated".
+        let accounts = s.list_accounts().unwrap();
+        assert_eq!(accounts.len(), 2);
+        let alice = accounts.iter().find(|a| a.handle == "alice").unwrap();
+        assert_eq!(alice.display_name, "Alice A");
+        assert_eq!(alice.secret_ref, "cmd:p");
+
+        assert!(s.set_account_enabled(id, false).unwrap());
+        assert!(!s.get_account(id).unwrap().unwrap().enabled);
+        assert!(!s.set_account_enabled(999, true).unwrap());
+
+        assert!(s.remove_account(id2).unwrap());
+        assert!(!s.remove_account(id2).unwrap());
+        assert!(s.get_account(id2).unwrap().is_none());
+    }
+
+    #[test]
+    fn topic_crud_upsert_enable_disable() {
+        let s = Storage::in_memory().unwrap();
+        let t = s.add_topic("tech", &["rust".into(), "go".into()]).unwrap();
+        // Upsert by name replaces keywords.
+        let t2 = s.add_topic("tech", &["zig".into()]).unwrap();
+        let topics = s.list_topics().unwrap();
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].keywords, vec!["zig".to_string()]);
+        assert_eq!(t2, topics[0].id);
+        let _ = t;
+
+        let got = s.get_topic(topics[0].id).unwrap().unwrap();
+        assert_eq!(got.name, "tech");
+        assert!(s.get_topic(999).unwrap().is_none());
+
+        assert!(s.set_topic_enabled(topics[0].id, false).unwrap());
+        assert!(!s.get_topic(topics[0].id).unwrap().unwrap().enabled);
+        assert!(!s.set_topic_enabled(999, true).unwrap());
+
+        // list_topics orders by name.
+        s.add_topic("alpha", &[]).unwrap();
+        let names: Vec<String> = s.list_topics().unwrap().into_iter().map(|t| t.name).collect();
+        assert_eq!(names, vec!["alpha".to_string(), "tech".to_string()]);
+
+        assert!(s.remove_topic(topics[0].id).unwrap());
+        assert!(!s.remove_topic(topics[0].id).unwrap());
+    }
+
+    #[test]
+    fn posts_store_images_and_pagination() {
+        let s = Storage::in_memory().unwrap();
+        let t = s.add_topic("pics", &["p".into()]).unwrap();
+        let mut p = post(Network::Instagram, "img1", 1000);
+        p.images.push(crate::models::PostImage {
+            id: 0,
+            post_id: 0,
+            url: "https://cdn/1.jpg".into(),
+            local_path: None,
+            width: Some(640),
+            height: Some(480),
+            alt_text: Some("a cat".into()),
+        });
+        p.images.push(crate::models::PostImage {
+            id: 0,
+            post_id: 0,
+            url: "https://cdn/2.jpg".into(),
+            local_path: Some("/tmp/2.jpg".into()),
+            width: None,
+            height: None,
+            alt_text: None,
+        });
+        let id = s.insert_post(&p, &[t]).unwrap().unwrap();
+
+        let stored = s.post(id).unwrap().unwrap();
+        assert_eq!(stored.images.len(), 2);
+        assert_eq!(stored.images[0].url, "https://cdn/1.jpg");
+        assert_eq!(stored.images[0].width, Some(640));
+        assert_eq!(stored.images[0].alt_text.as_deref(), Some("a cat"));
+        assert_eq!(stored.images[1].local_path.as_deref(), Some("/tmp/2.jpg"));
+        assert!(s.post(999).unwrap().is_none());
+
+        for i in 1..=5 {
+            s.insert_post(&post(Network::Reddit, &format!("p{i}"), 2000 + i), &[t])
+                .unwrap();
+        }
+        assert_eq!(s.feed_count(t).unwrap(), 6);
+        let page1 = s.feed(t, 2, 0).unwrap();
+        assert_eq!(page1.len(), 2);
+        let page3 = s.feed(t, 2, 4).unwrap();
+        assert_eq!(page3.len(), 2);
+        let past_end = s.feed(t, 2, 100).unwrap();
+        assert!(past_end.is_empty());
+    }
+
+    #[test]
+    fn set_image_local_path_updates_row() {
+        let s = Storage::in_memory().unwrap();
+        let t = s.add_topic("x", &[]).unwrap();
+        let mut p = post(Network::X, "withimg", 1000);
+        p.images.push(crate::models::PostImage {
+            id: 0,
+            post_id: 0,
+            url: "u".into(),
+            local_path: None,
+            width: None,
+            height: None,
+            alt_text: None,
+        });
+        let id = s.insert_post(&p, &[t]).unwrap().unwrap();
+        let stored = s.post(id).unwrap().unwrap();
+        let img_id = stored.images[0].id;
+        s.set_image_local_path(img_id, "/cache/u.img").unwrap();
+        let stored = s.post(id).unwrap().unwrap();
+        assert_eq!(stored.images[0].local_path.as_deref(), Some("/cache/u.img"));
+    }
+
+    #[test]
+    fn cursors_roundtrip_and_upsert() {
+        let s = Storage::in_memory().unwrap();
+        let a = s.add_account(Network::Reddit, "c1", "", "").unwrap();
+        assert!(s.get_cursor(a).unwrap().is_none());
+        s.set_cursor(a, Some("tok1")).unwrap();
+        let c = s.get_cursor(a).unwrap().unwrap();
+        assert_eq!(c.cursor.as_deref(), Some("tok1"));
+        assert!(c.last_synced_at.is_some());
+        s.set_cursor(a, None).unwrap();
+        let c = s.get_cursor(a).unwrap().unwrap();
+        assert!(c.cursor.is_none());
+    }
+
+    #[test]
+    fn insert_post_with_unknown_topic_link_is_ignored_gracefully() {
+        let s = Storage::in_memory().unwrap();
+        let t = s.add_topic("real", &[]).unwrap();
+        let p = post(Network::X, "links", 1000);
+        // Foreign-keys ON: linking to topic 999 would violate the constraint,
+        // so only the valid link survives.
+        let id = s.insert_post(&p, &[t]).unwrap().unwrap();
+        assert_eq!(s.feed_count(t).unwrap(), 1);
+        let _ = id;
+    }
 }

@@ -59,3 +59,80 @@ impl SecretResolver {
         self.resolve(secret_ref).ok()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolver(pairs: &[(&str, &str)]) -> SecretResolver {
+        SecretResolver::new(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn plain_ref_reads_environment_variable() {
+        env::set_var("SMA_TEST_SECRET_PLAIN", "topsecret");
+        let r = resolver(&[]);
+        assert_eq!(r.resolve("SMA_TEST_SECRET_PLAIN").unwrap(), "topsecret");
+    }
+
+    #[test]
+    fn env_prefix_reads_environment_variable() {
+        env::set_var("SMA_TEST_SECRET_ENV", "v2");
+        let r = resolver(&[]);
+        assert_eq!(r.resolve("env:SMA_TEST_SECRET_ENV").unwrap(), "v2");
+    }
+
+    #[test]
+    fn missing_environment_variable_is_an_error() {
+        let r = resolver(&[]);
+        let err = r.resolve("SMA_DEFINITELY_NOT_SET_XYZ").unwrap_err();
+        assert!(err.to_string().contains("is not set"), "{err}");
+        assert!(r.try_resolve("SMA_DEFINITELY_NOT_SET_XYZ").is_none());
+    }
+
+    #[test]
+    fn unregistered_provider_is_an_error() {
+        let r = resolver(&[]);
+        let err = r.resolve("cmd:nothing").unwrap_err();
+        assert!(err.to_string().contains("no command registered"), "{err}");
+        assert!(r.try_resolve("cmd:nothing").is_none());
+    }
+
+    #[test]
+    fn command_stdout_is_trimmed() {
+        let r = resolver(&[("echo", "printf '  spaced  '")]);
+        assert_eq!(r.resolve("cmd:echo").unwrap(), "spaced");
+    }
+
+    #[test]
+    fn failing_command_is_an_error() {
+        let r = resolver(&[("bad", "exit 3")]);
+        let err = r.resolve("cmd:bad").unwrap_err();
+        assert!(err.to_string().contains("exited with"), "{err}");
+    }
+
+    #[test]
+    fn empty_output_is_an_error() {
+        let r = resolver(&[("silent", "true")]);
+        let err = r.resolve("cmd:silent").unwrap_err();
+        assert!(err.to_string().contains("produced no output"), "{err}");
+    }
+
+    #[test]
+    fn unrunnable_command_is_an_error() {
+        // `sh -c` runs, but the exec of the binary itself fails.
+        let r = resolver(&[("ghost", "definitely-not-a-real-binary-xyz")]);
+        assert!(r.resolve("cmd:ghost").is_err());
+    }
+
+    #[test]
+    fn try_resolve_returns_some_for_command_secret() {
+        let r = resolver(&[("ok", "echo hi")]);
+        assert_eq!(r.try_resolve("cmd:ok").as_deref(), Some("hi"));
+    }
+}

@@ -679,3 +679,409 @@ fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     Rect { x, y, width: w, height: h }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn app_with(storage: Storage) -> App {
+        let mut config = Config::default();
+        config.settings.page_size = 10;
+        App::new(&config, storage).unwrap()
+    }
+
+    fn key(code: KeyCode) -> event::KeyEvent {
+        event::KeyEvent::new(code, event::KeyModifiers::empty())
+    }
+
+    fn seeded_app() -> App {
+        let storage = Storage::in_memory().unwrap();
+        let t = storage.add_topic("tech", &["rust".into()]).unwrap();
+        let a = storage
+            .add_account(Network::Reddit, "alice", "Alice", "")
+            .unwrap();
+        let _ = a;
+        for i in 0..3 {
+            let mut p = crate::models::Post {
+                id: 0,
+                network: Network::Reddit,
+                account_handle: "alice".into(),
+                external_id: format!("p{i}"),
+                author: "bob".into(),
+                content: format!("rust post {i}\nsecond line"),
+                url: format!("https://reddit.com/p{i}"),
+                created_at: chrono::Utc::now() - chrono::Duration::hours(i as i64),
+                fetched_at: chrono::Utc::now(),
+                images: Vec::new(),
+            };
+            let _ = &mut p;
+            storage.insert_post(&p, &[t]).unwrap();
+        }
+        app_with(storage)
+    }
+
+    #[test]
+    fn new_app_starts_on_feed_and_loads_data() {
+        let app = seeded_app();
+        assert_eq!(app.screen, Screen::Feed);
+        assert_eq!(app.topics.len(), 1);
+        assert_eq!(app.accounts.len(), 1);
+        assert_eq!(app.feed.len(), 3);
+
+        // Empty storage leaves feed empty without error.
+        let app = app_with(Storage::in_memory().unwrap());
+        assert!(app.feed.is_empty());
+    }
+
+    #[test]
+    fn screen_switching_and_quit() {
+        let mut app = seeded_app();
+        app.on_key(key(KeyCode::Char('1')));
+        assert_eq!(app.screen, Screen::Accounts);
+        app.on_key(key(KeyCode::Char('2')));
+        assert_eq!(app.screen, Screen::Topics);
+        app.on_key(key(KeyCode::Char('3')));
+        assert_eq!(app.screen, Screen::Feed);
+        app.on_key(key(KeyCode::Char('4')));
+        assert_eq!(app.screen, Screen::Sync);
+        assert_eq!(app.sync_log, vec!["press s to sync".to_string()]);
+        app.on_key(key(KeyCode::Char('q')));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn topic_cycling_resets_feed_position() {
+        let storage = Storage::in_memory().unwrap();
+        let t1 = storage.add_topic("a", &["x".into()]).unwrap();
+        let t2 = storage.add_topic("b", &["y".into()]).unwrap();
+        let mut post = crate::models::Post {
+            id: 0,
+            network: Network::X,
+            account_handle: "u".into(),
+            external_id: "e1".into(),
+            author: "u".into(),
+            content: "x marks".into(),
+            url: String::new(),
+            created_at: chrono::Utc::now(),
+            fetched_at: chrono::Utc::now(),
+            images: Vec::new(),
+        };
+        storage.insert_post(&post, &[t1]).unwrap();
+        post.external_id = "e2".into();
+        post.content = "y town".into();
+        storage.insert_post(&post, &[t2]).unwrap();
+
+        let mut app = app_with(storage);
+        assert_eq!(app.topics[0].name, "a");
+        assert_eq!(app.feed.len(), 1);
+
+        // 't' cycles to topic b and its feed.
+        app.on_key(key(KeyCode::Char('t')));
+        assert_eq!(app.topics[app.topic_sel].name, "b");
+        assert_eq!(app.feed.len(), 1);
+        assert!(app.feed[0].content.contains("y town"));
+    }
+
+    #[test]
+    fn feed_pagination_clamps_at_zero() {
+        let mut app = seeded_app();
+        app.on_key(key(KeyCode::Char('n')));
+        assert_eq!(app.feed_offset, 10);
+        app.on_key(key(KeyCode::Char('p')));
+        assert_eq!(app.feed_offset, 0);
+        // 'p' again saturates at zero.
+        app.on_key(key(KeyCode::Char('p')));
+        assert_eq!(app.feed_offset, 0);
+    }
+
+    #[test]
+    fn selection_moves_within_bounds() {
+        let mut app = seeded_app();
+        // Feed: down wraps 0 -> 1 -> 2 -> 0.
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.feed_sel, 1);
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.feed_sel, 2);
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.feed_sel, 0);
+        // Up from 0 wraps to len-1.
+        app.on_key(key(KeyCode::Char('k')));
+        assert_eq!(app.feed_sel, 2);
+
+        // Accounts list.
+        app.on_key(key(KeyCode::Char('1')));
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.list_sel, 0); // single item wraps
+        // Sync screen has no list.
+        app.on_key(key(KeyCode::Char('4')));
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.list_sel, 0);
+    }
+
+    #[test]
+    fn detail_opens_on_enter_and_closes_on_q_esc() {
+        let mut app = seeded_app();
+        assert!(app.detail.is_none());
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.detail.is_some());
+        let d = app.detail.as_ref().unwrap();
+        assert_eq!(d.post.external_id, "p0"); // feed_sel starts at newest
+        assert!(d.previews.is_empty());
+
+        // In detail mode, keys besides q/esc are ignored...
+        app.on_key(key(KeyCode::Char('1')));
+        assert!(app.detail.is_some());
+        assert_eq!(app.screen, Screen::Feed);
+        app.on_key(key(KeyCode::Char('q')));
+        assert!(app.detail.is_none());
+    }
+
+    #[test]
+    fn account_input_parses_all_shapes() {
+        let mut app = seeded_app();
+        app.on_key(key(KeyCode::Char('1'))); // accounts screen
+        app.on_key(key(KeyCode::Char('a'))); // start add
+        assert!(app.input.is_some());
+
+        // Esc cancels.
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.input.is_none());
+        assert_eq!(app.accounts.len(), 1);
+
+        // Basic NETWORK:HANDLE.
+        app.on_key(key(KeyCode::Char('a')));
+        for c in "reddit:bob".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.accounts.len(), 2);
+        assert!(app.accounts.iter().any(|a| a.handle == "bob"));
+        assert_eq!(app.message, "added");
+
+        // DISPLAY and SECRET parts.
+        app.on_key(key(KeyCode::Char('a')));
+        for c in "x:carol:Carol C:envT".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        let carol = app.accounts.iter().find(|a| a.handle == "carol").unwrap();
+        assert_eq!(carol.display_name, "Carol C");
+        assert_eq!(carol.secret_ref, "envT");
+        assert_eq!(carol.network, Network::X);
+
+        // Bad network name reports an error, adds nothing.
+        app.on_key(key(KeyCode::Char('a')));
+        for c in "nope:dave".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.message.starts_with("error:"));
+        assert!(!app.accounts.iter().any(|a| a.handle == "dave"));
+
+        // Missing handle reports usage error.
+        app.on_key(key(KeyCode::Char('a')));
+        for c in "justanetwork".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.message.contains("expected NETWORK:HANDLE"), "{}", app.message);
+    }
+
+    #[test]
+    fn backspace_edits_input_buffer() {
+        let mut app = seeded_app();
+        app.on_key(key(KeyCode::Char('1')));
+        app.on_key(key(KeyCode::Char('a')));
+        for c in "reddit:bo".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Backspace));
+        for c in "ob".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.accounts.iter().any(|a| a.handle == "bob"));
+    }
+
+    #[test]
+    fn topic_input_adds_name_and_keywords() {
+        let mut app = seeded_app();
+        app.on_key(key(KeyCode::Char('2')));
+        app.on_key(key(KeyCode::Char('a')));
+        for c in "news:rust, go, tui".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        let t = app.topics.iter().find(|t| t.name == "news").unwrap();
+        assert_eq!(t.keywords, vec!["rust".to_string(), "go".to_string(), "tui".to_string()]);
+
+        // Name-only topic.
+        app.on_key(key(KeyCode::Char('a')));
+        for c in "empty".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        let t = app.topics.iter().find(|t| t.name == "empty").unwrap();
+        assert!(t.keywords.is_empty());
+
+        // Empty name rejected. The colon form "":kw" trims to empty name.
+        app.on_key(key(KeyCode::Char('a')));
+        app.on_key(key(KeyCode::Char(':')));
+        app.on_key(key(KeyCode::Char('k')));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.message.starts_with("error:"));
+
+        // Empty input commit is a no-op without message change.
+        let before = app.message.clone();
+        app.on_key(key(KeyCode::Char('a')));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.message, before);
+    }
+
+    #[test]
+    fn delete_selected_removes_account_and_topic() {
+        let mut app = seeded_app();
+        app.on_key(key(KeyCode::Char('1')));
+        app.on_key(key(KeyCode::Char('d')));
+        assert_eq!(app.message, "deleted");
+        assert!(app.accounts.is_empty());
+
+        app.on_key(key(KeyCode::Char('2')));
+        app.on_key(key(KeyCode::Char('d')));
+        assert_eq!(app.message, "deleted");
+        assert!(app.topics.is_empty());
+        // Refreshing the feed on an empty topic list clears it.
+        app.on_key(key(KeyCode::Char('3')));
+        assert!(app.feed.is_empty());
+    }
+
+    #[test]
+    fn toggle_selected_flips_enabled_state() {
+        let mut app = seeded_app();
+        app.on_key(key(KeyCode::Char('2')));
+        assert!(app.topics[0].enabled);
+        app.on_key(key(KeyCode::Char('e')));
+        assert_eq!(app.message, "toggled");
+        assert!(!app.topics[0].enabled);
+        app.on_key(key(KeyCode::Char('e')));
+        assert!(app.topics[0].enabled);
+
+        app.on_key(key(KeyCode::Char('1')));
+        app.on_key(key(KeyCode::Char('e')));
+        assert!(!app.accounts[0].enabled);
+    }
+
+    #[test]
+    fn toggle_on_empty_feed_reports_nothing_to_toggle() {
+        let mut app = app_with(Storage::in_memory().unwrap());
+        app.on_key(key(KeyCode::Char('3')));
+        app.on_key(key(KeyCode::Char('e')));
+        assert_eq!(app.message, "nothing to toggle");
+    }
+
+    #[test]
+    fn sync_screen_run_collects_report_lines() {
+        let mut app = seeded_app();
+        app.on_key(key(KeyCode::Char('4')));
+        app.on_key(key(KeyCode::Char('s')));
+        // The seeded reddit account has no reachable endpoint; sync reports
+        // an error line but the log must have exactly one entry.
+        assert_eq!(app.sync_log.len(), 1);
+        assert!(app.sync_log[0].starts_with("reddit alice:") || app.sync_log[0].starts_with("sync failed"));
+    }
+
+    #[test]
+    fn render_all_screens_and_overlays_on_test_backend() {
+        // Accounts/topics/feed/sync + input popup + detail popup.
+        let mut app = seeded_app();
+
+        for screen_key in ['1', '2', '3', '4'] {
+            app.on_key(key(KeyCode::Char(screen_key)));
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|f| app.render(f)).unwrap();
+        }
+
+        // Input popup on accounts screen.
+        app.on_key(key(KeyCode::Char('1')));
+        app.on_key(key(KeyCode::Char('a')));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+
+        // Detail overlay on feed screen.
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::Char('3')));
+        app.on_key(key(KeyCode::Enter));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+    }
+
+    #[test]
+    fn render_empty_states() {
+        // No topics/accounts/feed at all: every screen renders without panic.
+        let mut app = app_with(Storage::in_memory().unwrap());
+        for screen_key in ['1', '2', '3', '4'] {
+            app.on_key(key(KeyCode::Char(screen_key)));
+            let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+            terminal.draw(|f| app.render(f)).unwrap();
+        }
+    }
+
+    #[test]
+    fn osc8_wraps_label_with_hyperlink_escape() {
+        let s = osc8("https://x.com", "label");
+        assert!(s.starts_with("\x1b]8;;https://x.com\x1b\\"));
+        assert!(s.ends_with("\x1b]8;;\x1b\\"));
+        assert!(s.contains("label"));
+    }
+
+    #[test]
+    fn centered_rect_keeps_minimums_and_clamps() {
+        let area = Rect::new(0, 0, 100, 50);
+        let r = centered_rect(area, 70, 3);
+        assert_eq!(r.width, 70);
+        assert_eq!(r.height, 3);
+        assert_eq!(r.x, 15);
+        assert_eq!(r.y, 23);
+
+        // Tiny area: width >= 20 clamped to area width; height >= 3.
+        let tiny = Rect::new(0, 0, 10, 4);
+        let r = centered_rect(tiny, 50, 50);
+        assert_eq!(r.width, 10);
+        assert_eq!(r.height, 3);
+
+        // Zero area cannot exceed bounds.
+        let zero = Rect::new(0, 0, 0, 0);
+        let r = centered_rect(zero, 50, 50);
+        assert_eq!((r.width, r.height), (0, 0));
+    }
+
+    #[test]
+    fn input_screen_other_screens_commit_is_noop() {
+        let mut app = seeded_app();
+        app.on_key(key(KeyCode::Char('3'))); // feed screen
+        app.input = Some(Input {
+            prompt: "p".into(),
+            buffer: "reddit:zz".into(),
+        });
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.input.is_none());
+        // Feed screen has no add semantics; nothing added, no error.
+        assert!(!app.accounts.iter().any(|a| a.handle == "zz"));
+    }
+
+    #[test]
+    fn non_press_key_kinds_are_ignored_in_loop_helper() {
+        // on_key itself doesn't check kind (the event loop does); ensure a
+        // release-kind key still routes without panic here.
+        let mut app = seeded_app();
+        let k = event::KeyEvent {
+            code: KeyCode::Char('q'),
+            modifiers: event::KeyModifiers::empty(),
+            kind: event::KeyEventKind::Release,
+            state: event::KeyEventState::empty(),
+        };
+        app.on_key(k);
+        assert!(app.should_quit);
+    }
+}

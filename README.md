@@ -1,6 +1,5 @@
 # social-media-aggregator (`sma`)
-
-A Rust TUI that aggregates posts from multiple social networks into a single
+A Rust TUI that aggregates posts from multiple social networks into single
 topic-filtered feed. Multiple accounts per network, normalized post model,
 persistent SQLite storage, and a `ratatui` interface.
 
@@ -19,17 +18,27 @@ Only text and image posts are modeled in this first release; video is skipped.
 
 ## Build
 
+A `mise.toml` pins the Rust toolchain (currently `1.98.0`) so anyone with
+[mise](https://mise.jdx.dev/) gets a reproducible build:
+
+```bash
+mise install         # one-time, installs pinned Rust
+mise exec -- cargo build --release
+```
+
+On a plain machine without mise:
+
 ```bash
 cargo build --release
 ```
 
-The binary is `target/release/sma`.
+binary is `target/release/sma`.
 
-> **Linker note:** this project was built on a host that ships a runtime-only
-> glibc (no `glibc-devel`). A local glibc-devel shim is unpacked under
+> **Linker note:** this project was built on host that ships runtime-only
+> glibc (no `glibc-devel`). Local glibc-devel shim is unpacked under
 > `~/.local/share/sma-sysroot` and referenced from `.cargo/config.toml`. On a
 > normal development machine you can delete `.cargo/config.toml` and the
-> `sma-sysroot` directory; the project builds with the system toolchain.
+> `sma-sysroot` directory; project builds with system toolchain.
 
 ## Quick start
 
